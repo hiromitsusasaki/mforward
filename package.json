@@ -1,0 +1,31 @@
+{
+  "name": "mforward",
+  "version": "0.1.0",
+  "description": "CLI client for mfapi (MoneyForward ME automation API)",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap",
+    "dev": "tsx src/index.ts",
+    "lint": "node -c dist/index.js || true"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.13.5",
+    "commander": "^14.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "bin": {
+    "mforward": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
