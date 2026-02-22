@@ -1,24 +1,18 @@
 #!/usr/bin/env node
 
-import axios from 'axios';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import process from 'node:process';
 import { Command } from 'commander';
+import { defaultDataDir, defaultUserDataDir, tsLabel } from './lib/paths.js';
+import { launchPersistent, ensurePage, saveEvidence, looksLoggedOut } from './lib/browser.js';
+import { notify } from './lib/notify.js';
 
-type Json = Record<string, unknown>;
-
-function getBaseUrl(): string {
-  // mfapi's example server is http://localhost:3001/api
-  return (process.env.MFAPI_BASE_URL || 'http://localhost:3001/api').replace(/\/+$/, '');
-}
-
-function client() {
-  const baseURL = getBaseUrl();
-  return axios.create({
-    baseURL,
-    timeout: 30_000,
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json'
-    }
+async function waitForEnter(message = 'Press Enter to continue...') {
+  process.stdout.write(`\n${message}\n`);
+  return new Promise<void>((resolve) => {
+    process.stdin.resume();
+    process.stdin.once('data', () => resolve());
   });
 }
 
@@ -27,131 +21,77 @@ async function main() {
 
   program
     .name('mforward')
-    .description('CLI client for mfapi (MoneyForward ME automation API)')
-    .option('-j, --json', 'Output raw JSON')
-    .option('--base-url <url>', 'Override base URL (or set MFAPI_BASE_URL env)');
-
-  program.hook('preAction', (thisCmd) => {
-    const opts = thisCmd.opts<{ baseUrl?: string }>();
-    if (opts.baseUrl) process.env.MFAPI_BASE_URL = opts.baseUrl;
-  });
+    .description('MoneyForward ME helper: browser automation (manual login -> session reuse)')
+    .option('--user-data-dir <dir>', 'Playwright persistent profile dir', defaultUserDataDir())
+    .option('--data-dir <dir>', 'Output data dir', defaultDataDir());
 
   program
-    .command('accounts')
-    .description('List custom accounts')
-    .action(async () => {
-      const res = await client().get('/accounts');
-      print(program, res.data);
+    .command('open')
+    .description('Open Chrome with a dedicated persistent profile for manual login')
+    .option('--url <url>', 'Start URL', 'https://moneyforward.com/')
+    .action(async (opts) => {
+      const { userDataDir } = program.opts<{ userDataDir: string }>();
+      const ctx = await launchPersistent({ userDataDir, headless: false });
+      const page = await ensurePage(ctx);
+      await page.goto(opts.url, { waitUntil: 'domcontentloaded' });
+      await waitForEnter('Log in if needed, then press Enter here to close the browser.');
+      await ctx.close();
     });
 
-  const assets = program.command('assets').description('Manage assets under an account');
+  const fetchCmd = program.command('fetch').description('Fetch and export data by navigating pages');
 
-  assets
-    .command('list')
-    .description('List assets in an account')
-    .argument('<accountString>', 'Account connection string (id@subAccountIdHash)')
-    .action(async (accountString: string) => {
-      const res = await client().get(`/accounts/${encodeURIComponent(accountString)}/assets`);
-      print(program, res.data);
-    });
+  fetchCmd
+    .command('page')
+    .description('Fetch a page and save HTML + screenshot as evidence (starting point for parsers)')
+    .requiredOption('--url <url>', 'Target URL (e.g. transactions page)')
+    .option('--headless', 'Run headless (default false)', false)
+    .action(async (opts) => {
+      const { userDataDir, dataDir } = program.opts<{ userDataDir: string; dataDir: string }>();
+      const ctx = await launchPersistent({ userDataDir, headless: !!opts.headless });
+      const page = await ensurePage(ctx);
 
-  assets
-    .command('create')
-    .description('Create an asset in an account')
-    .argument('<accountString>', 'Account connection string (id@subAccountIdHash)')
-    .requiredOption('--subclass <id>', 'assetSubclassId (e.g. Cash, DomesticStock, InvestmentTrust, ...)')
-    .requiredOption('--name <name>', 'Asset name')
-    .requiredOption('--value <value>', 'Asset value (number)', (v) => Number(v))
-    .option('--entriedPrice <price>', 'Entry price (number)', (v) => Number(v))
-    .option('--entriedAt <yyyy/mm/dd>', 'Entry date as string')
-    .option('--ensure', 'Enable ensure option (if server supports it)')
-    .action(async (accountString: string, opts: any) => {
-      const body: Json = {
-        assetSubclassId: opts.subclass,
-        name: opts.name,
-        value: opts.value
+      await page.goto(opts.url, { waitUntil: 'domcontentloaded' });
+
+      if (await looksLoggedOut(page)) {
+        const msg = `ログインが必要そうです（セッション切れ/ログイン画面判定）。\n` +
+          `1) mforward open --url '${opts.url}' でChromeを開きログイン\n` +
+          `2) その後もう一度 mforward fetch page --url '${opts.url}' を実行\n`;
+
+        await notify({
+          title: 'MoneyForward: 要ログイン',
+          body: msg
+        }).catch((e) => {
+          console.error('notify failed:', e);
+        });
+
+        await ctx.close();
+        process.exitCode = 2;
+        return;
+      }
+
+      const label = tsLabel();
+      const outRaw = path.join(dataDir, 'raw');
+      const evidence = await saveEvidence(page, outRaw, label);
+
+      // Also store minimal metadata
+      const meta = {
+        fetchedAt: new Date().toISOString(),
+        url: page.url(),
+        title: await page.title().catch(() => null),
+        htmlPath: evidence.htmlPath,
+        pngPath: evidence.pngPath
       };
-      if (opts.entriedPrice !== undefined) body.entriedPrice = opts.entriedPrice;
-      if (opts.entriedAt !== undefined) body.entriedAt = opts.entriedAt;
+      await fs.mkdir(outRaw, { recursive: true });
+      await fs.writeFile(path.join(outRaw, `${label}.meta.json`), JSON.stringify(meta, null, 2));
 
-      const res = await client().post(
-        `/accounts/${encodeURIComponent(accountString)}/assets`,
-        body,
-        { params: opts.ensure ? { ensure: 'true' } : undefined }
-      );
-      print(program, { status: res.status, statusText: res.statusText });
-    });
-
-  assets
-    .command('update')
-    .description('Update an asset (assetSubclassId must remain the same as current)')
-    .argument('<accountString>', 'Account connection string (id@subAccountIdHash)')
-    .argument('<assetId>', 'Asset ID')
-    .requiredOption('--subclass <id>', 'assetSubclassId (must match existing)')
-    .requiredOption('--name <name>', 'Asset name')
-    .requiredOption('--value <value>', 'Asset value (number)', (v) => Number(v))
-    .option('--entriedPrice <price>', 'Entry price (number)', (v) => Number(v))
-    .option('--entriedAt <yyyy/mm/dd>', 'Entry date as string')
-    .option('--ensure', 'Enable ensure option (if server supports it)')
-    .action(async (accountString: string, assetId: string, opts: any) => {
-      const body: Json = {
-        assetId,
-        assetSubclassId: opts.subclass,
-        name: opts.name,
-        value: opts.value
-      };
-      if (opts.entriedPrice !== undefined) body.entriedPrice = opts.entriedPrice;
-      if (opts.entriedAt !== undefined) body.entriedAt = opts.entriedAt;
-
-      const res = await client().put(
-        `/accounts/${encodeURIComponent(accountString)}/assets/${encodeURIComponent(assetId)}`,
-        body,
-        { params: opts.ensure ? { ensure: 'true' } : undefined }
-      );
-      print(program, { status: res.status, statusText: res.statusText });
-    });
-
-  assets
-    .command('delete')
-    .description('Delete an asset')
-    .argument('<accountString>', 'Account connection string (id@subAccountIdHash)')
-    .argument('<assetId>', 'Asset ID')
-    .option('--ensure', 'Enable ensure option (if server supports it)')
-    .action(async (accountString: string, assetId: string, opts: any) => {
-      const res = await client().delete(
-        `/accounts/${encodeURIComponent(accountString)}/assets/${encodeURIComponent(assetId)}`,
-        { params: opts.ensure ? { ensure: 'true' } : undefined }
-      );
-      print(program, { status: res.status, statusText: res.statusText });
+      console.log(JSON.stringify(meta, null, 2));
+      await ctx.close();
     });
 
   await program.parseAsync(process.argv);
 }
 
-function print(program: Command, data: unknown) {
-  const opts = program.opts<{ json?: boolean }>();
-  if (opts.json) {
-    process.stdout.write(JSON.stringify(data, null, 2) + '\n');
-    return;
-  }
-
-  // pretty-ish default
-  if (Array.isArray(data)) {
-    console.table(data);
-  } else {
-    console.dir(data, { depth: null, colors: process.stdout.isTTY });
-  }
-}
-
 main().catch((err) => {
-  // Axios errors
-  const status = err?.response?.status;
-  const body = err?.response?.data;
-  if (status) {
-    console.error(`HTTP ${status}`);
-    if (body) console.error(typeof body === 'string' ? body : JSON.stringify(body, null, 2));
-  } else {
-    console.error(err);
-  }
+  console.error(err);
   process.exit(1);
 });

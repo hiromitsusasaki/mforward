@@ -1,9 +1,11 @@
 # mforward
 
-MoneyForward ME automation API (mfapi) client.
+MoneyForward ME helper CLI: **browser automation** (manual login → session reuse) using Playwright.
 
-This CLI talks to **mfapi** (unofficial REST API) documented here:
-- https://sammrai.github.io/mfapi/
+## Why
+- Avoid storing MoneyForward credentials in the CLI
+- Handle 2FA by **human-in-the-loop** login
+- Reuse session via a dedicated Chrome profile (Playwright persistent context)
 
 ## Install (dev)
 
@@ -13,42 +15,49 @@ npm run build
 npm link
 ```
 
-## Usage
+## Quick start
 
-Set base URL via env (default: `http://localhost:3001/api`):
-
-```bash
-export MFAPI_BASE_URL='http://localhost:3001/api'
-```
-
-List accounts:
+1) Open Chrome with a dedicated automation profile and log in:
 
 ```bash
-mforward accounts
+mforward open --url 'https://moneyforward.com/'
 ```
 
-List assets in an account:
+2) Fetch a page (saves HTML + screenshot under `./data/raw/`):
 
 ```bash
-mforward assets list '<accountString>'
+mforward fetch page --url 'https://moneyforward.com/'
 ```
 
-Create asset:
+If the CLI detects you are logged out, it will ask you to run `mforward open` again.
+
+## Profile & data directories
+
+- Profile (default): `~/.config/mforward/chrome-profile`
+- Data (default): `./data`
+
+Override:
 
 ```bash
-mforward assets create '<accountString>' \
-  --subclass Cash \
-  --name 'Wallet' \
-  --value 12345
+mforward --user-data-dir /path/to/profile --data-dir /path/to/data ...
 ```
 
-Output JSON:
+## Notifications (optional)
 
-```bash
-mforward --json accounts
-```
+### Discord (recommended)
+Use a Discord incoming webhook:
+
+- `DISCORD_WEBHOOK_URL`: webhook URL
+- `DISCORD_MENTION`: mention string like `<@YOUR_USER_ID>`
+
+### Telegram
+Use a Telegram bot:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+
+If none are set, notifications fall back to stderr.
 
 ## Notes
-
-- This project is a thin CLI wrapper around mfapi.
-- `--ensure` is passed as a query param when supported by the server.
+- Avoid using your daily Chrome profile directly.
+- Automation may break if MF changes UI; this CLI stores evidence (HTML/screenshot) to iterate parsers safely.
